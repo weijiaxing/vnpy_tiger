@@ -6,12 +6,12 @@ import sys
 from copy import copy
 from datetime import datetime, timezone
 from threading import Thread
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from decimal import Decimal
 
 from tigeropen.common.consts import Language, Market, Currency
 from tigeropen.common.util.signature_utils import read_private_key
-from tigeropen.tiger_open_config import TigerOpenConfig
+from tigeropen.tiger_open_config import TigerOpenClientConfig
 from tigeropen.trade.trade_client import TradeClient
 from tigeropen.quote.quote_client import QuoteClient
 from tigeropen.common.consts.service_types import QuoteBasicService
@@ -145,7 +145,7 @@ class TigerGateway(BaseGateway):
             private_key = read_private_key(private_key_path)
             
             # 配置Tiger Open API
-            config = TigerOpenConfig(
+            config = TigerOpenClientConfig(
                 tiger_id=tiger_id,
                 account=account,
                 private_key=private_key,
