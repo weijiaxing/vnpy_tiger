@@ -353,15 +353,19 @@ class TigerGateway(BaseGateway):
         order = req.create_order_data(local_id, self.gateway_name)
         
         try:
-            # 创建Tiger订单对象
+            # 创建Tiger订单对象 - 使用正确的构造方法
             from tigeropen.trade.domain.order import Order
-            tiger_order = Order()
-            tiger_order.account = self.account
-            tiger_order.symbol = req.symbol
-            tiger_order.action = DIRECTION_VT2TIGER.get(req.direction, "BUY")
-            tiger_order.order_type = ORDERTYPE_VT2TIGER.get(req.type, "LMT")
-            tiger_order.quantity = int(req.volume)
             
+            # Tiger Order需要必要的参数
+            tiger_order = Order(
+                account=self.account,
+                symbol=req.symbol,
+                action=DIRECTION_VT2TIGER.get(req.direction, "BUY"),
+                order_type=ORDERTYPE_VT2TIGER.get(req.type, "LMT"),
+                quantity=int(req.volume)
+            )
+            
+            # 设置限价单价格
             if req.type == OrderType.LIMIT:
                 tiger_order.limit_price = float(req.price)
             
@@ -586,8 +590,15 @@ class TigerGateway(BaseGateway):
             # 查询美股合约
             self.write_log("开始查询合约信息...")
             
-            # 查询一些热门股票作为示例
-            popular_symbols = ['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META']
+            # 查询热门股票和ETF
+            popular_symbols = [
+                # 热门股票
+                'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META',
+                # 热门ETF
+                'SPY', 'QQQ', 'IWM', 'VTI', 'VOO', 'VEA', 'VWO',
+                # 其他热门股票
+                'NFLX', 'AMD', 'INTC', 'CRM', 'ADBE', 'PYPL', 'DIS'
+            ]
             
             for symbol in popular_symbols:
                 try:
@@ -605,7 +616,7 @@ class TigerGateway(BaseGateway):
                 except Exception as e:
                     self.write_log(f"添加合约 {symbol} 失败: {str(e)}")
             
-            self.write_log(f"合约查询完成，共加载 {len(popular_symbols)} 个合约")
+            self.write_log(f"合约查询完成，共加载 {len(popular_symbols)} 个合约 (包含股票和ETF)")
             
         except Exception as e:
             self.write_log(f"查询合约失败: {str(e)}")
