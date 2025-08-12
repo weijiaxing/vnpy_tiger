@@ -214,6 +214,9 @@ class TigerGateway(BaseGateway):
         self.add_task(self.connect_quote)
         self.add_task(self.connect_trade)
         self.add_task(self.connect_push)
+        
+        # 查询合约信息
+        self.add_task(self.query_contracts)
 
     def init_client_config(self):
         """初始化客户端配置"""
@@ -321,8 +324,24 @@ class TigerGateway(BaseGateway):
 
     def subscribe(self, req: SubscribeRequest) -> None:
         """订阅行情"""
-        self.subscribed_symbols.add(req.symbol)
-        self.write_log(f"订阅行情: {req.vt_symbol}")
+        if not self.quote_client:
+            self.write_log("行情客户端未连接，无法订阅行情")
+            return
+        
+        try:
+            # 添加到订阅列表
+            self.subscribed_symbols.add(req.symbol)
+            
+            # 如果推送客户端已连接，立即订阅
+            if self.push_connected and self.push_client:
+                tiger_symbol = f"{req.symbol}"
+                self.push_client.subscribe_quote([tiger_symbol])
+                self.write_log(f"订阅行情成功: {req.vt_symbol}")
+            else:
+                self.write_log(f"行情订阅已记录，等待推送连接: {req.vt_symbol}")
+                
+        except Exception as e:
+            self.write_log(f"订阅行情失败: {str(e)}")
 
     def send_order(self, req: OrderRequest) -> str:
         """发送订单"""
@@ -369,12 +388,26 @@ class TigerGateway(BaseGateway):
     def cancel_order(self, req: CancelRequest) -> None:
         """撤销订单"""
         if not self.trade_client:
+            self.write_log("交易客户端未连接，无法撤销订单")
             return
         
         try:
-            self.write_log(f"撤销订单: {req.orderid}")
+            # 查找Tiger订单ID
+            tiger_order_id = self.ID_VT2TIGER.get(req.orderid)
+            if not tiger_order_id:
+                self.write_log(f"未找到对应的Tiger订单ID: {req.orderid}")
+                return
+            
+            # 撤销订单
+            result = self.trade_client.cancel_order(tiger_order_id)
+            
+            if result:
+                self.write_log(f"撤销订单成功: {req.orderid}")
+            else:
+                self.write_log(f"撤销订单失败: {req.orderid}")
+                
         except Exception as e:
-            self.write_log(f"撤销订单失败: {str(e)}")
+            self.write_log(f"撤销订单异常: {str(e)}")
 
     def query_account(self) -> None:
         """查询账户"""
@@ -438,9 +471,50 @@ class TigerGateway(BaseGateway):
             return
         
         try:
-            self.write_log("持仓查询成功")
+            # 查询真实持仓信息
+            positions = self.trade_client.get_positions()
+            
+            if positions:
+                for pos in positions:
+                    # 解析持仓数据
+                    symbol = getattr(pos, 'symbol', '')
+                    quantity = float(getattr(pos, 'quantity', 0))
+                    
+                    if quantity == 0:
+                        continue  # 跳过零持仓
+                    
+                    # 确定交易所
+                    market = getattr(pos, 'market', 'US')
+                    exchange = EXCHANGE_TIGER2VT.get(market, Exchange.NASDAQ)
+                    
+                    # 确定方向
+                    direction = Direction.LONG if quantity > 0 else Direction.SHORT
+                    
+                    # 创建持仓数据
+                    position = PositionData(
+                        symbol=symbol,
+                        exchange=exchange,
+                        direction=direction,
+                        volume=abs(quantity),
+                        frozen=0.0,
+                        price=float(getattr(pos, 'average_cost', 0)),
+                        pnl=float(getattr(pos, 'unrealized_pnl', 0)),
+                        gateway_name=self.gateway_name
+                    )
+                    self.on_position(position)
+                    
+                    # 记录持仓信息
+                    pnl_str = f"${position.pnl:.2f}" if position.pnl != 0 else "$0.00"
+                    self.write_log(f"持仓: {symbol} {direction.value} {abs(quantity)} @ ${position.price:.2f}, 盈亏: {pnl_str}")
+                
+                self.write_log("持仓查询完成")
+            else:
+                self.write_log("当前无持仓")
+                
         except Exception as e:
             self.write_log(f"查询持仓失败: {str(e)}")
+            import traceback
+            self.write_log(f"持仓查询详细错误: {traceback.format_exc()}")
 
     def get_new_local_id(self) -> str:
         """生成新的本地订单ID"""
@@ -458,6 +532,13 @@ class TigerGateway(BaseGateway):
                 self.push_client.subscribe_asset()
                 self.push_client.subscribe_position()
                 self.push_client.subscribe_order()
+                
+                # 订阅之前记录的行情
+                if self.subscribed_symbols:
+                    symbols_list = list(self.subscribed_symbols)
+                    self.push_client.subscribe_quote(symbols_list)
+                    self.write_log(f"订阅 {len(symbols_list)} 个行情推送")
+                
                 self.write_log("推送订阅设置完成")
             except Exception as e:
                 self.write_log(f"推送订阅设置失败: {str(e)}")
@@ -496,8 +577,52 @@ class TigerGateway(BaseGateway):
         except Exception as e:
             self.write_log(f"处理订单推送异常: {str(e)}")
 
+    def query_contracts(self) -> None:
+        """查询合约信息"""
+        if not self.quote_client:
+            return
+        
+        try:
+            # 查询美股合约
+            self.write_log("开始查询合约信息...")
+            
+            # 查询一些热门股票作为示例
+            popular_symbols = ['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META']
+            
+            for symbol in popular_symbols:
+                try:
+                    contract = ContractData(
+                        symbol=symbol,
+                        exchange=Exchange.NASDAQ,
+                        name=symbol,
+                        product=Product.EQUITY,
+                        size=1,
+                        pricetick=0.01,
+                        gateway_name=self.gateway_name
+                    )
+                    self.on_contract(contract)
+                    self.contracts[contract.vt_symbol] = contract
+                except Exception as e:
+                    self.write_log(f"添加合约 {symbol} 失败: {str(e)}")
+            
+            self.write_log(f"合约查询完成，共加载 {len(popular_symbols)} 个合约")
+            
+        except Exception as e:
+            self.write_log(f"查询合约失败: {str(e)}")
+
     def query_history(self, req: HistoryRequest) -> List[BarData]:
         """查询历史数据"""
         history = []
         self.write_log(f"查询历史数据: {req.vt_symbol}")
+        
+        if not self.quote_client:
+            return history
+        
+        try:
+            # 这里可以实现历史数据查询
+            # 由于Tiger API的历史数据接口比较复杂，暂时返回空列表
+            self.write_log("历史数据查询功能待完善")
+        except Exception as e:
+            self.write_log(f"查询历史数据失败: {str(e)}")
+        
         return history
