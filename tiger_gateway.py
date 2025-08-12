@@ -625,22 +625,21 @@ class TigerGateway(BaseGateway):
                     
                     for symbol_info in symbols_data[:max_contracts]:
                         try:
-                            # 尝试不同的方式获取symbol
-                            if hasattr(symbol_info, 'symbol'):
-                                symbol = symbol_info.symbol
-                            elif hasattr(symbol_info, 'code'):
-                                symbol = symbol_info.code
-                            else:
-                                symbol = str(symbol_info)
+                            # 数据是字符串类型，直接使用
+                            symbol = str(symbol_info).strip()
                             
-                            # 过滤掉一些特殊符号
-                            if '.' in symbol or len(symbol) > 5 or len(symbol) < 1:
+                            # 过滤掉一些特殊符号和无效数据
+                            if ('.' in symbol or 
+                                len(symbol) > 6 or 
+                                len(symbol) < 1 or 
+                                symbol.isdigit() or  # 纯数字
+                                not symbol.isalnum()):  # 包含特殊字符
                                 continue
                                 
                             contract = self.get_contract(symbol, Exchange.NASDAQ)
                             if contract:
                                 loaded_count += 1
-                                if loaded_count <= 5:  # 只记录前5个
+                                if loaded_count <= 10:  # 记录前10个
                                     self.write_log(f"创建合约: {symbol}")
                                 
                         except Exception as e:
@@ -722,8 +721,11 @@ class TigerGateway(BaseGateway):
             # 推送给系统 - 这很重要！
             self.on_contract(contract)
             
-            # 只在动态创建时记录日志，预加载时不记录
-            if hasattr(self, '_loading_initial_contracts') and not self._loading_initial_contracts:
+            # 调试：确认合约推送
+            if hasattr(self, '_loading_initial_contracts') and self._loading_initial_contracts:
+                # 预加载时只记录少量日志
+                pass
+            else:
                 self.write_log(f"动态创建合约: {symbol} ({exchange.value})")
             
             return contract
