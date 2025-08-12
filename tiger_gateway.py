@@ -588,40 +588,83 @@ class TigerGateway(BaseGateway):
             self.write_log(f"处理订单推送异常: {str(e)}")
 
     def query_contracts(self) -> None:
-        """查询合约信息 - 预加载常用合约并支持动态创建"""
+        """查询合约信息 - 使用Tiger API获取真实合约数据"""
         if not self.quote_client:
             return
         
         try:
-            self.write_log("开始加载常用合约...")
+            self.write_log("开始查询合约信息...")
             
-            # 设置加载标志，避免过多日志
+            # 设置加载标志
             self._loading_initial_contracts = True
             
-            # 预加载常用合约，让用户在界面中能看到
-            popular_symbols = [
-                # 热门股票
-                'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META',
-                # 热门ETF
-                'SPY', 'QQQ', 'IWM', 'VTI', 'VOO', 'VEA', 'VWO',
-                # 其他热门股票
-                'NFLX', 'AMD', 'INTC', 'CRM', 'ADBE', 'PYPL', 'DIS'
-            ]
-            
-            loaded_count = 0
-            for symbol in popular_symbols:
-                contract = self.get_contract(symbol, Exchange.NASDAQ)
-                if contract:
-                    loaded_count += 1
+            # 尝试使用Tiger API获取合约列表
+            try:
+                from tigeropen.common.consts import Market
+                
+                # 获取美股合约
+                symbols_data = self.quote_client.get_symbols(market=Market.US)
+                
+                if symbols_data and len(symbols_data) > 0:
+                    self.write_log(f"从Tiger API获取到 {len(symbols_data)} 个美股合约")
+                    
+                    # 限制加载数量，避免过多合约影响性能
+                    max_contracts = 500  # 限制最多加载500个合约
+                    loaded_count = 0
+                    
+                    for symbol_info in symbols_data[:max_contracts]:
+                        try:
+                            symbol = symbol_info.symbol if hasattr(symbol_info, 'symbol') else str(symbol_info)
+                            
+                            # 过滤掉一些特殊符号
+                            if '.' in symbol or len(symbol) > 5:
+                                continue
+                                
+                            contract = self.get_contract(symbol, Exchange.NASDAQ)
+                            if contract:
+                                loaded_count += 1
+                                
+                        except Exception as e:
+                            continue  # 跳过有问题的合约
+                    
+                    self.write_log(f"成功加载 {loaded_count} 个合约")
+                    
+                else:
+                    # 如果API调用失败，回退到预设合约列表
+                    self.write_log("Tiger API未返回合约数据，使用预设合约列表")
+                    self._load_popular_contracts()
+                    
+            except Exception as api_error:
+                self.write_log(f"Tiger API查询失败: {str(api_error)}")
+                self.write_log("回退到预设合约列表")
+                self._load_popular_contracts()
             
             # 清除加载标志
             self._loading_initial_contracts = False
-            
-            self.write_log(f"预加载完成，共加载 {loaded_count} 个常用合约")
-            self.write_log("系统支持动态创建任意美股/ETF合约")
+            self.write_log("合约查询完成，系统支持动态创建任意美股/ETF合约")
             
         except Exception as e:
             self.write_log(f"合约查询失败: {str(e)}")
+            self._loading_initial_contracts = False
+
+    def _load_popular_contracts(self):
+        """加载预设的热门合约"""
+        popular_symbols = [
+            # 热门股票
+            'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META',
+            # 热门ETF
+            'SPY', 'QQQ', 'IWM', 'VTI', 'VOO', 'VEA', 'VWO',
+            # 其他热门股票
+            'NFLX', 'AMD', 'INTC', 'CRM', 'ADBE', 'PYPL', 'DIS'
+        ]
+        
+        loaded_count = 0
+        for symbol in popular_symbols:
+            contract = self.get_contract(symbol, Exchange.NASDAQ)
+            if contract:
+                loaded_count += 1
+        
+        self.write_log(f"预设合约加载完成，共 {loaded_count} 个")
 
     def get_contract(self, symbol: str, exchange: Exchange = Exchange.NASDAQ) -> ContractData:
         """动态获取或创建合约"""
