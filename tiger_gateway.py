@@ -14,7 +14,7 @@ from tigeropen.common.util.signature_utils import read_private_key
 from tigeropen.tiger_open_config import TigerOpenClientConfig
 from tigeropen.trade.trade_client import TradeClient
 from tigeropen.quote.quote_client import QuoteClient
-from tigeropen.common.consts.service_types import QuoteBasicService
+from tigeropen.common.consts import service_types
 from tigeropen.trade.domain.order import Order
 from tigeropen.quote.domain.subscribe_param import SubscribeParam
 from tigeropen.common.consts import OrderStatus as TigerOrderStatus
@@ -197,7 +197,7 @@ class TigerGateway(BaseGateway):
             param = SubscribeParam()
             param.symbols = [tiger_symbol]
             param.market = market
-            param.quote_types = [QuoteBasicService.QUOTE]
+            param.quote_types = [service_types.QUOTE_REAL_TIME]
             
             self.quote_client.subscribe(param)
             self.subscribed[req.vt_symbol] = req
