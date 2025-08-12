@@ -183,7 +183,11 @@ class TigerGateway(BaseGateway):
 
     def connect(self, setting: dict) -> None:
         """连接Tiger Securities"""
-        if not TIGER_AVAILABLE:
+        # 实时检查Tiger API是否可用
+        try:
+            import tigeropen
+            from tigeropen.tiger_open_config import TigerOpenClientConfig
+        except ImportError:
             self.write_log("Tiger API未安装，请先安装: pip install tigeropen")
             return
             
@@ -213,8 +217,8 @@ class TigerGateway(BaseGateway):
 
     def init_client_config(self):
         """初始化客户端配置"""
-        sandbox = (self.environment == "sandbox")
-        self.client_config = TigerOpenClientConfig(sandbox_debug=sandbox)
+        # 新版本Tiger API不再支持sandbox_debug参数
+        self.client_config = TigerOpenClientConfig()
         self.client_config.private_key = self.private_key
         self.client_config.tiger_id = self.tiger_id
         self.client_config.account = self.account
@@ -310,17 +314,55 @@ class TigerGateway(BaseGateway):
             return
         
         try:
-            # 创建模拟账户数据
+            # 查询真实账户资产
+            assets = self.trade_client.get_assets()
+            if assets:
+                for asset in assets:
+                    # 获取账户信息
+                    account_id = getattr(asset, 'account', self.account)
+                    
+                    # 获取余额信息
+                    balance = 0.0
+                    frozen = 0.0
+                    
+                    if hasattr(asset, 'summary'):
+                        summary = asset.summary
+                        # 获取净资产作为余额
+                        raw_balance = getattr(summary, 'net_liquidation', 0) or \
+                                    getattr(summary, 'total_cash', 0) or \
+                                    getattr(summary, 'cash', 0) or 0
+                        
+                        # 修复浮点数精度问题，四舍五入到美分
+                        balance = round(float(raw_balance), 2)
+                        
+                        # 获取冻结资金
+                        raw_frozen = getattr(summary, 'init_margin_req', 0) or \
+                                   getattr(summary, 'initial_margin', 0) or 0
+                        frozen = round(float(raw_frozen), 2)
+                    
+                    # 创建账户数据
+                    account = AccountData(
+                        accountid=account_id,
+                        balance=balance,
+                        frozen=frozen,
+                        gateway_name=self.gateway_name
+                    )
+                    self.on_account(account)
+                    
+                    # 格式化显示美元金额
+                    self.write_log(f"账户查询成功: 账户 {account_id}, 余额 ${balance:.2f}, 冻结 ${frozen:.2f}")
+            else:
+                self.write_log("未获取到账户资产信息")
+        except Exception as e:
+            self.write_log(f"查询账户失败: {str(e)}")
+            # 如果API调用失败，显示基本账户信息
             account = AccountData(
                 accountid=self.account,
-                balance=100000.0,
+                balance=0.0,
                 frozen=0.0,
                 gateway_name=self.gateway_name
             )
             self.on_account(account)
-            self.write_log("账户查询成功")
-        except Exception as e:
-            self.write_log(f"查询账户失败: {str(e)}")
 
     def query_position(self) -> None:
         """查询持仓"""
