@@ -598,67 +598,13 @@ class TigerGateway(BaseGateway):
             # 设置加载标志
             self._loading_initial_contracts = True
             
-            # 尝试使用Tiger API获取合约列表
-            try:
-                from tigeropen.common.consts import Market
-                
-                self.write_log("正在调用Tiger API获取合约...")
-                
-                # 获取美股合约
-                symbols_data = self.quote_client.get_symbols(market=Market.US)
-                
-                self.write_log(f"Tiger API返回数据类型: {type(symbols_data)}")
-                self.write_log(f"Tiger API返回数据长度: {len(symbols_data) if symbols_data else 0}")
-                
-                if symbols_data and len(symbols_data) > 0:
-                    self.write_log(f"从Tiger API获取到 {len(symbols_data)} 个美股合约")
-                    
-                    # 查看前几个数据的结构
-                    for i, item in enumerate(symbols_data[:3]):
-                        self.write_log(f"样本数据 {i+1}: {item} (类型: {type(item)})")
-                        if hasattr(item, '__dict__'):
-                            self.write_log(f"  属性: {list(item.__dict__.keys())}")
-                    
-                    # 限制加载数量，避免过多合约影响性能
-                    max_contracts = 100  # 先减少到100个测试
-                    loaded_count = 0
-                    
-                    for symbol_info in symbols_data[:max_contracts]:
-                        try:
-                            # 数据是字符串类型，直接使用
-                            symbol = str(symbol_info).strip()
-                            
-                            # 过滤掉一些特殊符号和无效数据
-                            if ('.' in symbol or 
-                                len(symbol) > 6 or 
-                                len(symbol) < 1 or 
-                                symbol.isdigit() or  # 纯数字
-                                not symbol.isalnum()):  # 包含特殊字符
-                                continue
-                                
-                            contract = self.get_contract(symbol, Exchange.NASDAQ)
-                            if contract:
-                                loaded_count += 1
-                                if loaded_count <= 10:  # 记录前10个
-                                    self.write_log(f"创建合约: {symbol}")
-                                
-                        except Exception as e:
-                            self.write_log(f"处理合约 {symbol_info} 时出错: {str(e)}")
-                            continue
-                    
-                    self.write_log(f"成功加载 {loaded_count} 个合约")
-                    
-                else:
-                    # 如果API调用失败，回退到预设合约列表
-                    self.write_log("Tiger API未返回合约数据，使用预设合约列表")
-                    self._load_popular_contracts()
-                    
-            except Exception as api_error:
-                self.write_log(f"Tiger API查询失败: {str(api_error)}")
-                import traceback
-                self.write_log(f"详细错误: {traceback.format_exc()}")
-                self.write_log("回退到预设合约列表")
-                self._load_popular_contracts()
+            # 暂时使用预设合约列表，确保合约能正确显示
+            self.write_log("使用预设合约列表加载常用合约")
+            self._load_popular_contracts()
+            
+            # TODO: 后续优化Tiger API合约获取
+            # 目前Tiger API虽然能获取到数据，但合约推送到界面有问题
+            # 先确保基本功能正常，再优化API集成
             
             # 清除加载标志
             self._loading_initial_contracts = False
@@ -681,9 +627,30 @@ class TigerGateway(BaseGateway):
         
         loaded_count = 0
         for symbol in popular_symbols:
-            contract = self.get_contract(symbol, Exchange.NASDAQ)
-            if contract:
+            try:
+                # 直接创建合约，不使用get_contract方法
+                contract = ContractData(
+                    symbol=symbol,
+                    exchange=Exchange.NASDAQ,
+                    name=symbol,
+                    product=Product.EQUITY,
+                    size=1,
+                    pricetick=0.01,
+                    gateway_name=self.gateway_name
+                )
+                
+                # 缓存合约
+                vt_symbol = f"{symbol}.{Exchange.NASDAQ.value}"
+                self.contracts[vt_symbol] = contract
+                
+                # 推送给系统
+                self.on_contract(contract)
                 loaded_count += 1
+                
+                self.write_log(f"加载合约: {symbol}")
+                
+            except Exception as e:
+                self.write_log(f"加载合约 {symbol} 失败: {str(e)}")
         
         self.write_log(f"预设合约加载完成，共 {loaded_count} 个")
 
