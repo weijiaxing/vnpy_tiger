@@ -1,0 +1,2 @@
+vnpy>=4.0.0
+tigeropen>=2.0.0
