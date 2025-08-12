@@ -214,9 +214,6 @@ class TigerGateway(BaseGateway):
         self.add_task(self.connect_quote)
         self.add_task(self.connect_trade)
         self.add_task(self.connect_push)
-        
-        # 查询合约信息
-        self.add_task(self.query_contracts)
 
     def init_client_config(self):
         """初始化客户端配置"""
@@ -247,6 +244,9 @@ class TigerGateway(BaseGateway):
         try:
             self.quote_client = QuoteClient(self.client_config)
             self.write_log("行情接口连接成功")
+            
+            # 连接成功后立即查询合约
+            self.add_task(self.query_contracts)
             
             # 测试行情连接
             try:
@@ -602,30 +602,50 @@ class TigerGateway(BaseGateway):
             try:
                 from tigeropen.common.consts import Market
                 
+                self.write_log("正在调用Tiger API获取合约...")
+                
                 # 获取美股合约
                 symbols_data = self.quote_client.get_symbols(market=Market.US)
+                
+                self.write_log(f"Tiger API返回数据类型: {type(symbols_data)}")
+                self.write_log(f"Tiger API返回数据长度: {len(symbols_data) if symbols_data else 0}")
                 
                 if symbols_data and len(symbols_data) > 0:
                     self.write_log(f"从Tiger API获取到 {len(symbols_data)} 个美股合约")
                     
+                    # 查看前几个数据的结构
+                    for i, item in enumerate(symbols_data[:3]):
+                        self.write_log(f"样本数据 {i+1}: {item} (类型: {type(item)})")
+                        if hasattr(item, '__dict__'):
+                            self.write_log(f"  属性: {list(item.__dict__.keys())}")
+                    
                     # 限制加载数量，避免过多合约影响性能
-                    max_contracts = 500  # 限制最多加载500个合约
+                    max_contracts = 100  # 先减少到100个测试
                     loaded_count = 0
                     
                     for symbol_info in symbols_data[:max_contracts]:
                         try:
-                            symbol = symbol_info.symbol if hasattr(symbol_info, 'symbol') else str(symbol_info)
+                            # 尝试不同的方式获取symbol
+                            if hasattr(symbol_info, 'symbol'):
+                                symbol = symbol_info.symbol
+                            elif hasattr(symbol_info, 'code'):
+                                symbol = symbol_info.code
+                            else:
+                                symbol = str(symbol_info)
                             
                             # 过滤掉一些特殊符号
-                            if '.' in symbol or len(symbol) > 5:
+                            if '.' in symbol or len(symbol) > 5 or len(symbol) < 1:
                                 continue
                                 
                             contract = self.get_contract(symbol, Exchange.NASDAQ)
                             if contract:
                                 loaded_count += 1
+                                if loaded_count <= 5:  # 只记录前5个
+                                    self.write_log(f"创建合约: {symbol}")
                                 
                         except Exception as e:
-                            continue  # 跳过有问题的合约
+                            self.write_log(f"处理合约 {symbol_info} 时出错: {str(e)}")
+                            continue
                     
                     self.write_log(f"成功加载 {loaded_count} 个合约")
                     
@@ -636,6 +656,8 @@ class TigerGateway(BaseGateway):
                     
             except Exception as api_error:
                 self.write_log(f"Tiger API查询失败: {str(api_error)}")
+                import traceback
+                self.write_log(f"详细错误: {traceback.format_exc()}")
                 self.write_log("回退到预设合约列表")
                 self._load_popular_contracts()
             
