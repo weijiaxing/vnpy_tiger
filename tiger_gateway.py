@@ -329,6 +329,9 @@ class TigerGateway(BaseGateway):
             return
         
         try:
+            # 动态创建合约（如果不存在）
+            self.get_contract(req.symbol, req.exchange)
+            
             # 添加到订阅列表
             self.subscribed_symbols.add(req.symbol)
             
@@ -348,6 +351,9 @@ class TigerGateway(BaseGateway):
         if not self.trade_client:
             self.write_log("交易客户端未连接，无法发送订单")
             return ""
+        
+        # 动态创建合约（如果不存在）
+        self.get_contract(req.symbol, req.exchange)
         
         local_id = self.get_new_local_id()
         order = req.create_order_data(local_id, self.gateway_name)
@@ -582,44 +588,47 @@ class TigerGateway(BaseGateway):
             self.write_log(f"处理订单推送异常: {str(e)}")
 
     def query_contracts(self) -> None:
-        """查询合约信息"""
+        """初始化合约查询系统"""
         if not self.quote_client:
             return
         
         try:
-            # 查询美股合约
-            self.write_log("开始查询合约信息...")
-            
-            # 查询热门股票和ETF
-            popular_symbols = [
-                # 热门股票
-                'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META',
-                # 热门ETF
-                'SPY', 'QQQ', 'IWM', 'VTI', 'VOO', 'VEA', 'VWO',
-                # 其他热门股票
-                'NFLX', 'AMD', 'INTC', 'CRM', 'ADBE', 'PYPL', 'DIS'
-            ]
-            
-            for symbol in popular_symbols:
-                try:
-                    contract = ContractData(
-                        symbol=symbol,
-                        exchange=Exchange.NASDAQ,
-                        name=symbol,
-                        product=Product.EQUITY,
-                        size=1,
-                        pricetick=0.01,
-                        gateway_name=self.gateway_name
-                    )
-                    self.on_contract(contract)
-                    self.contracts[contract.vt_symbol] = contract
-                except Exception as e:
-                    self.write_log(f"添加合约 {symbol} 失败: {str(e)}")
-            
-            self.write_log(f"合约查询完成，共加载 {len(popular_symbols)} 个合约 (包含股票和ETF)")
+            self.write_log("合约查询系统已就绪 - 支持动态查询任意美股/ETF合约")
+            self.write_log("用户可以直接输入任何股票代码进行交易，系统会自动创建合约")
             
         except Exception as e:
-            self.write_log(f"查询合约失败: {str(e)}")
+            self.write_log(f"合约查询系统初始化失败: {str(e)}")
+
+    def get_contract(self, symbol: str, exchange: Exchange = Exchange.NASDAQ) -> ContractData:
+        """动态获取或创建合约"""
+        vt_symbol = f"{symbol}.{exchange.value}"
+        
+        # 如果合约已存在，直接返回
+        if vt_symbol in self.contracts:
+            return self.contracts[vt_symbol]
+        
+        # 动态创建新合约
+        try:
+            contract = ContractData(
+                symbol=symbol,
+                exchange=exchange,
+                name=symbol,
+                product=Product.EQUITY,
+                size=1,
+                pricetick=0.01,
+                gateway_name=self.gateway_name
+            )
+            
+            # 缓存合约并推送给系统
+            self.contracts[vt_symbol] = contract
+            self.on_contract(contract)
+            
+            self.write_log(f"动态创建合约: {symbol} ({exchange.value})")
+            return contract
+            
+        except Exception as e:
+            self.write_log(f"创建合约 {symbol} 失败: {str(e)}")
+            return None
 
     def query_history(self, req: HistoryRequest) -> List[BarData]:
         """查询历史数据"""
