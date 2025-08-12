@@ -244,6 +244,15 @@ class TigerGateway(BaseGateway):
         try:
             self.quote_client = QuoteClient(self.client_config)
             self.write_log("行情接口连接成功")
+            
+            # 测试行情连接
+            try:
+                # 简单的API调用测试连接
+                self.quote_client.get_market_state()
+                self.write_log("行情接口测试成功")
+            except Exception as test_e:
+                self.write_log(f"行情接口测试失败: {str(test_e)}")
+                
         except Exception as e:
             self.write_log(f"行情接口连接失败: {str(e)}")
 
@@ -251,24 +260,52 @@ class TigerGateway(BaseGateway):
         """连接交易服务"""
         try:
             self.trade_client = TradeClient(self.client_config)
+            self.write_log("交易接口连接成功")
+            
+            # 立即查询账户和持仓信息
             self.add_task(self.query_account)
             self.add_task(self.query_position)
-            self.write_log("交易接口连接成功")
+            
+            # 测试交易连接
+            try:
+                # 简单的API调用测试连接
+                self.trade_client.get_assets()
+                self.write_log("交易接口测试成功")
+            except Exception as test_e:
+                self.write_log(f"交易接口测试失败: {str(test_e)}")
+                
         except Exception as e:
             self.write_log(f"交易接口连接失败: {str(e)}")
 
     def connect_push(self):
         """连接推送服务"""
         try:
+            if not TIGER_AVAILABLE:
+                self.write_log("Tiger API不可用，跳过推送连接")
+                return
+                
+            # 检查是否有推送配置
+            if not hasattr(self.client_config, 'socket_host_port'):
+                self.write_log("推送服务配置不可用，跳过推送连接")
+                return
+                
             protocol, host, port = self.client_config.socket_host_port
             self.push_client = PushClient(host, port, (protocol == "ssl"))
             
+            # 设置回调函数
+            self.push_client.quote_changed = self.on_quote_change
+            self.push_client.asset_changed = self.on_asset_change
+            self.push_client.position_changed = self.on_position_change
+            self.push_client.order_changed = self.on_order_change
             self.push_client.connect_callback = self.on_push_connected
             
+            # 连接推送服务
             self.push_client.connect(
                 self.client_config.tiger_id, self.client_config.private_key)
+            self.write_log("推送接口连接成功")
         except Exception as e:
             self.write_log(f"推送接口连接失败: {str(e)}")
+            # 推送失败不影响基本功能，继续运行
 
     def close(self) -> None:
         """关闭连接"""
@@ -382,7 +419,51 @@ class TigerGateway(BaseGateway):
     def on_push_connected(self):
         """推送连接成功回调"""
         self.push_connected = True
-        self.write_log("推送接口连接成功")
+        self.write_log("推送服务连接成功")
+        
+        # 订阅推送
+        if self.push_client:
+            try:
+                self.push_client.subscribe_asset()
+                self.push_client.subscribe_position()
+                self.push_client.subscribe_order()
+                self.write_log("推送订阅设置完成")
+            except Exception as e:
+                self.write_log(f"推送订阅设置失败: {str(e)}")
+
+    def on_quote_change(self, tiger_symbol: str, data: list, trading: bool):
+        """行情推送回调"""
+        try:
+            # 这里可以处理实时行情推送
+            self.write_log(f"收到行情推送: {tiger_symbol}")
+        except Exception as e:
+            self.write_log(f"处理行情推送异常: {str(e)}")
+
+    def on_asset_change(self, tiger_account: str, data: list):
+        """资产变化推送回调"""
+        try:
+            self.write_log(f"收到资产变化推送: {tiger_account}")
+            # 重新查询账户信息
+            self.add_task(self.query_account)
+        except Exception as e:
+            self.write_log(f"处理资产推送异常: {str(e)}")
+
+    def on_position_change(self, tiger_account: str, data: list):
+        """持仓变化推送回调"""
+        try:
+            self.write_log(f"收到持仓变化推送: {tiger_account}")
+            # 重新查询持仓信息
+            self.add_task(self.query_position)
+        except Exception as e:
+            self.write_log(f"处理持仓推送异常: {str(e)}")
+
+    def on_order_change(self, tiger_account: str, data: list):
+        """订单变化推送回调"""
+        try:
+            self.write_log(f"收到订单变化推送: {tiger_account}")
+            # 这里可以处理订单状态变化
+        except Exception as e:
+            self.write_log(f"处理订单推送异常: {str(e)}")
 
     def query_history(self, req: HistoryRequest) -> List[BarData]:
         """查询历史数据"""
