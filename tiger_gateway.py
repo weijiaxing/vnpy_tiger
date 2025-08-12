@@ -588,16 +588,40 @@ class TigerGateway(BaseGateway):
             self.write_log(f"处理订单推送异常: {str(e)}")
 
     def query_contracts(self) -> None:
-        """初始化合约查询系统"""
+        """查询合约信息 - 预加载常用合约并支持动态创建"""
         if not self.quote_client:
             return
         
         try:
-            self.write_log("合约查询系统已就绪 - 支持动态查询任意美股/ETF合约")
-            self.write_log("用户可以直接输入任何股票代码进行交易，系统会自动创建合约")
+            self.write_log("开始加载常用合约...")
+            
+            # 设置加载标志，避免过多日志
+            self._loading_initial_contracts = True
+            
+            # 预加载常用合约，让用户在界面中能看到
+            popular_symbols = [
+                # 热门股票
+                'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META',
+                # 热门ETF
+                'SPY', 'QQQ', 'IWM', 'VTI', 'VOO', 'VEA', 'VWO',
+                # 其他热门股票
+                'NFLX', 'AMD', 'INTC', 'CRM', 'ADBE', 'PYPL', 'DIS'
+            ]
+            
+            loaded_count = 0
+            for symbol in popular_symbols:
+                contract = self.get_contract(symbol, Exchange.NASDAQ)
+                if contract:
+                    loaded_count += 1
+            
+            # 清除加载标志
+            self._loading_initial_contracts = False
+            
+            self.write_log(f"预加载完成，共加载 {loaded_count} 个常用合约")
+            self.write_log("系统支持动态创建任意美股/ETF合约")
             
         except Exception as e:
-            self.write_log(f"合约查询系统初始化失败: {str(e)}")
+            self.write_log(f"合约查询失败: {str(e)}")
 
     def get_contract(self, symbol: str, exchange: Exchange = Exchange.NASDAQ) -> ContractData:
         """动态获取或创建合约"""
@@ -609,21 +633,34 @@ class TigerGateway(BaseGateway):
         
         # 动态创建新合约
         try:
+            # 根据交易所设置不同的产品类型
+            if exchange in [Exchange.NASDAQ, Exchange.NYSE]:
+                product = Product.EQUITY
+                pricetick = 0.01
+            else:
+                product = Product.EQUITY
+                pricetick = 0.01
+            
             contract = ContractData(
                 symbol=symbol,
                 exchange=exchange,
-                name=symbol,
-                product=Product.EQUITY,
+                name=symbol,  # 可以后续通过API获取真实名称
+                product=product,
                 size=1,
-                pricetick=0.01,
+                pricetick=pricetick,
                 gateway_name=self.gateway_name
             )
             
-            # 缓存合约并推送给系统
+            # 缓存合约
             self.contracts[vt_symbol] = contract
+            
+            # 推送给系统 - 这很重要！
             self.on_contract(contract)
             
-            self.write_log(f"动态创建合约: {symbol} ({exchange.value})")
+            # 只在动态创建时记录日志，预加载时不记录
+            if hasattr(self, '_loading_initial_contracts') and not self._loading_initial_contracts:
+                self.write_log(f"动态创建合约: {symbol} ({exchange.value})")
+            
             return contract
             
         except Exception as e:
