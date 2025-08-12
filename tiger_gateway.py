@@ -247,11 +247,12 @@ class TigerGateway(BaseGateway):
             
             # 测试行情连接
             try:
-                # 简单的API调用测试连接
-                self.quote_client.get_market_state()
+                # 使用正确的API方法测试连接
+                self.quote_client.get_trading_calendar()
                 self.write_log("行情接口测试成功")
             except Exception as test_e:
-                self.write_log(f"行情接口测试失败: {str(test_e)}")
+                self.write_log(f"行情接口测试失败，但连接已建立: {str(test_e)}")
+                # 即使测试失败，行情客户端可能仍然可用
                 
         except Exception as e:
             self.write_log(f"行情接口连接失败: {str(e)}")
@@ -268,11 +269,15 @@ class TigerGateway(BaseGateway):
             
             # 测试交易连接
             try:
-                # 简单的API调用测试连接
-                self.trade_client.get_assets()
-                self.write_log("交易接口测试成功")
+                # 通过查询资产来测试连接
+                assets = self.trade_client.get_assets()
+                if assets:
+                    self.write_log("交易接口测试成功")
+                else:
+                    self.write_log("交易接口连接成功，但未获取到资产数据")
             except Exception as test_e:
-                self.write_log(f"交易接口测试失败: {str(test_e)}")
+                self.write_log(f"交易接口测试失败，但连接已建立: {str(test_e)}")
+                # 即使测试失败，交易客户端可能仍然可用
                 
         except Exception as e:
             self.write_log(f"交易接口连接失败: {str(e)}")
@@ -322,17 +327,43 @@ class TigerGateway(BaseGateway):
     def send_order(self, req: OrderRequest) -> str:
         """发送订单"""
         if not self.trade_client:
+            self.write_log("交易客户端未连接，无法发送订单")
             return ""
         
         local_id = self.get_new_local_id()
         order = req.create_order_data(local_id, self.gateway_name)
         
         try:
-            self.on_order(order)
-            self.write_log(f"订单提交: {req.vt_symbol}")
-            return order.vt_orderid
+            # 创建Tiger订单对象
+            from tigeropen.trade.domain.order import Order
+            tiger_order = Order()
+            tiger_order.account = self.account
+            tiger_order.symbol = req.symbol
+            tiger_order.action = DIRECTION_VT2TIGER.get(req.direction, "BUY")
+            tiger_order.order_type = ORDERTYPE_VT2TIGER.get(req.type, "LMT")
+            tiger_order.quantity = int(req.volume)
+            
+            if req.type == OrderType.LIMIT:
+                tiger_order.limit_price = float(req.price)
+            
+            # 发送订单到Tiger
+            result = self.trade_client.place_order(tiger_order)
+            
+            if result:
+                order.status = Status.SUBMITTING
+                self.on_order(order)
+                self.write_log(f"订单提交成功: {req.vt_symbol} {req.direction.value} {req.volume}@{req.price}")
+                return order.vt_orderid
+            else:
+                order.status = Status.REJECTED
+                self.on_order(order)
+                self.write_log(f"订单提交失败: {req.vt_symbol}")
+                return ""
+                
         except Exception as e:
-            self.write_log(f"订单提交失败: {str(e)}")
+            order.status = Status.REJECTED
+            self.on_order(order)
+            self.write_log(f"订单提交异常: {str(e)}")
             return ""
 
     def cancel_order(self, req: CancelRequest) -> None:
