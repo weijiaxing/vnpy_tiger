@@ -143,3 +143,15 @@ Thumbs.db
 *.key
 *.crt
 *.p12
+
+# Claude IDE
+.claude/
+
+# Temporary test files
+test_*.py
+*_test.py
+temp_*.py
+
+# Log files
+*.log
+tiger_test_*.log

@@ -1,6 +1,17 @@
 """
 Tiger Securities Gateway for VeighNa
-Based on tigeropen API
+
+基于Tiger Securities Open API的VeighNa交易接口
+
+功能特点:
+- 支持美股、港股、A股市场
+- 实时行情推送
+- 订单执行和管理
+- 账户信息查询
+- 持仓管理
+
+Author: weijiaxing
+Version: 1.0.0
 """
 
 from copy import copy
@@ -10,12 +21,12 @@ from queue import Empty, Queue
 from typing import Dict, List, Optional, Any
 import traceback
 
-# 检查Tiger API是否可用
+# Tiger API可用性检查
 TIGER_AVAILABLE = False
 try:
     import tigeropen
     TIGER_AVAILABLE = True
-    # 导入具体的类
+    # 导入Tiger API核心类
     from tigeropen.tiger_open_config import TigerOpenClientConfig
     from tigeropen.common.consts import Language, Currency, Market
     from tigeropen.quote.quote_client import QuoteClient
@@ -25,7 +36,7 @@ try:
     from tigeropen.common.exceptions import ApiException
 except ImportError:
     TIGER_AVAILABLE = False
-    # 创建占位符类
+    # Tiger API不可用时的占位符类
     class Market:
         US = "US"
         HK = "HK"
@@ -92,7 +103,19 @@ ORDERTYPE_TIGER2VT = {
     "MKT": OrderType.MARKET,
 }
 
-# 订单状态映射
+# 订单状态映射（字符串键，避免API未安装时的引用错误）
+STATUS_TIGER2VT_STRINGS = {
+    "PENDING_NEW": Status.SUBMITTING,
+    "NEW": Status.NOTTRADED,
+    "PARTIALLY_FILLED": Status.PARTTRADED,
+    "FILLED": Status.ALLTRADED,
+    "CANCELLED": Status.CANCELLED,
+    "PENDING_CANCEL": Status.CANCELLED,  # VeighNa无CANCELLING状态
+    "REJECTED": Status.REJECTED,
+    "EXPIRED": Status.CANCELLED
+}
+
+# Tiger API可用时的枚举映射
 if TIGER_AVAILABLE:
     STATUS_TIGER2VT = {
         OrderStatus.PENDING_NEW: Status.SUBMITTING,
@@ -100,12 +123,13 @@ if TIGER_AVAILABLE:
         OrderStatus.PARTIALLY_FILLED: Status.PARTTRADED,
         OrderStatus.FILLED: Status.ALLTRADED,
         OrderStatus.CANCELLED: Status.CANCELLED,
-        OrderStatus.PENDING_CANCEL: Status.CANCELLING,
+        OrderStatus.PENDING_CANCEL: Status.CANCELLED,  # VeighNa无CANCELLING状态
         OrderStatus.REJECTED: Status.REJECTED,
         OrderStatus.EXPIRED: Status.CANCELLED
     }
 else:
-    STATUS_TIGER2VT = {}
+    # API不可用时使用字符串映射
+    STATUS_TIGER2VT = STATUS_TIGER2VT_STRINGS
 
 # 交易所映射
 EXCHANGE_TIGER2VT = {
@@ -118,18 +142,36 @@ EXCHANGE_VT2TIGER = {v: k for k, v in EXCHANGE_TIGER2VT.items()}
 
 
 def convert_symbol_tiger2vt(tiger_symbol: str):
-    """转换Tiger符号到VT符号"""
+    """
+    转换Tiger符号到VeighNa符号
+    
+    参数:
+        tiger_symbol: Tiger格式的交易代码，如"AAPL"或"AAPL.US"
+        
+    返回:
+        (symbol, exchange) 元组
+    """
     if "." in tiger_symbol:
         symbol, exchange_str = tiger_symbol.split(".")
         exchange = EXCHANGE_TIGER2VT.get(exchange_str, Exchange.NASDAQ)
     else:
+        # 默认美股市场
         symbol = tiger_symbol
         exchange = Exchange.NASDAQ
     return symbol, exchange
 
 
 def convert_symbol_vt2tiger(symbol: str, exchange: Exchange):
-    """转换VT符号到Tiger符号"""
+    """
+    转换VeighNa符号到Tiger符号
+    
+    参数:
+        symbol: 交易代码
+        exchange: VeighNa交易所枚举
+        
+    返回:
+        Tiger格式的交易代码
+    """
     exchange_str = EXCHANGE_VT2TIGER.get(exchange, "US")
     return f"{symbol}.{exchange_str}"
 
@@ -142,22 +184,29 @@ class TigerGateway(BaseGateway):
     default_setting = {
         "tiger_id": "",
         "account": "",
-        "private_key": "",
-        "environment": "sandbox",  # sandbox or live
+        "private_key": "",  # 私钥内容（推荐）
+        "private_key_path": "",  # 私钥文件路径
+        "tiger_public_key_path": "",  # Tiger公钥路径（可选）
+        "environment": "sandbox",  # sandbox/live
         "language": "zh_CN",
+        "max_contracts": "100",  # 最大合约数量
+        "use_preset_contracts": "false",  # 使用预设合约
     }
     
     exchanges = [Exchange.NASDAQ, Exchange.NYSE, Exchange.SEHK, Exchange.SSE, Exchange.SZSE]
 
     def __init__(self, event_engine, gateway_name: str):
-        """Constructor"""
+        """初始化Tiger网关"""
         super().__init__(event_engine, gateway_name)
         
         self.tiger_id = ""
         self.account = ""
-        self.private_key = ""
+        self.private_key = ""  # 私钥内容
+        self.tiger_public_key = ""  # Tiger公钥（可选）
         self.environment = "sandbox"
-        self.language = Language.zh_CN if TIGER_AVAILABLE else "zh_CN"
+        self.language = "zh_CN"  # 默认中文
+        self.max_contracts = 100  # 最大合约数量
+        self.use_preset_contracts = False  # 使用预设合约
         
         self.client_config = None
         self.quote_client = None
@@ -165,7 +214,7 @@ class TigerGateway(BaseGateway):
         self.push_client = None
         
         self.local_id = 1000000
-        self.tradeid = 0
+        self.tradeid = 0  # 成交ID计数器
         
         self.active = False
         self.queue = Queue()
@@ -182,42 +231,83 @@ class TigerGateway(BaseGateway):
         self.subscribed_symbols = set()
 
     def connect(self, setting: dict) -> None:
-        """连接Tiger Securities"""
-        # 实时检查Tiger API是否可用
+        """连接Tiger证券API"""
+        # 检查Tiger API可用性
+        global TIGER_AVAILABLE
         try:
             import tigeropen
             from tigeropen.tiger_open_config import TigerOpenClientConfig
+            from tigeropen.common.consts import Language as TigerLanguage
+            # 更新全局标志
+            TIGER_AVAILABLE = True
+            # 使用Tiger Language类
+            language_class = TigerLanguage
         except ImportError:
             self.write_log("Tiger API未安装，请先安装: pip install tigeropen")
+            TIGER_AVAILABLE = False
             return
             
+        # 基本配置
         self.tiger_id = setting["tiger_id"]
         self.account = setting["account"]
-        self.private_key = setting["private_key"]
         self.environment = setting.get("environment", "sandbox")
         language_str = setting.get("language", "zh_CN")
-        self.language = Language.zh_CN if language_str == "zh_CN" else Language.en_US
+        # 设置语言
+        self.language = language_class.zh_CN if language_str == "zh_CN" else language_class.en_US
         
+        # 合约配置
+        self.max_contracts = int(setting.get("max_contracts", "100"))
+        use_preset_str = setting.get("use_preset_contracts", "false")
+        self.use_preset_contracts = use_preset_str.lower() == "true"
+        
+        # 私钥处理（支持内容或文件路径）
+        self.private_key = setting.get("private_key", "")
+        private_key_path = setting.get("private_key_path", "")
+        
+        # 从文件读取私钥
+        if not self.private_key and private_key_path:
+            try:
+                with open(private_key_path, 'r') as f:
+                    self.private_key = f.read()
+                self.write_log(f"已从文件加载私钥: {private_key_path}")
+            except Exception as e:
+                self.write_log(f"读取私钥文件失败: {str(e)}")
+                return
+        
+        # Tiger公钥处理（可选）
+        self.tiger_public_key = ""
+        tiger_public_key_path = setting.get("tiger_public_key_path", "")
+        if tiger_public_key_path:
+            try:
+                with open(tiger_public_key_path, 'r') as f:
+                    self.tiger_public_key = f.read()
+                self.write_log(f"已从文件加载Tiger公钥: {tiger_public_key_path}")
+            except Exception as e:
+                # Tiger公钥可选，失败不影响连接
+                self.write_log(f"读取Tiger公钥文件失败（可选）: {str(e)}")
+        
+        # 参数验证
         if not self.tiger_id or not self.account or not self.private_key:
             self.write_log("请填写完整的Tiger ID、账户和私钥信息")
+            self.write_log("私钥可以直接填写在private_key字段，或者通过private_key_path指定文件路径")
             return
         
-        # 初始化配置
+        # 初始化客户端配置
         self.init_client_config()
         
-        # 启动工作线程
+        # 启动查询线程
         self.active = True
         self.query_thread = Thread(target=self.run)
         self.query_thread.start()
         
-        # 连接各个服务
+        # 连接服务
         self.add_task(self.connect_quote)
         self.add_task(self.connect_trade)
         self.add_task(self.connect_push)
 
     def init_client_config(self):
         """初始化客户端配置"""
-        # 新版本Tiger API不再支持sandbox_debug参数
+        # 新版Tiger API无sandbox_debug参数
         self.client_config = TigerOpenClientConfig()
         self.client_config.private_key = self.private_key
         self.client_config.tiger_id = self.tiger_id
@@ -225,7 +315,7 @@ class TigerGateway(BaseGateway):
         self.client_config.language = self.language
 
     def run(self):
-        """工作线程主循环"""
+        """查询线程主循环"""
         while self.active:
             try:
                 func, args = self.queue.get(timeout=0.1)
@@ -240,39 +330,39 @@ class TigerGateway(BaseGateway):
         self.queue.put((func, args))
 
     def connect_quote(self):
-        """连接行情服务"""
+        """连接行情接口"""
         try:
             self.quote_client = QuoteClient(self.client_config)
             self.write_log("行情接口连接成功")
             
-            # 连接成功后立即查询合约
+            # 查询合约信息
             self.add_task(self.query_contracts)
             
-            # 测试行情连接
+            # 测试行情接口
             try:
-                # 使用正确的API方法测试连接
-                self.quote_client.get_trading_calendar()
+                # 使用美股市场测试连接
+                self.quote_client.get_trading_calendar(Market.US)
                 self.write_log("行情接口测试成功")
             except Exception as test_e:
                 self.write_log(f"行情接口测试失败，但连接已建立: {str(test_e)}")
-                # 即使测试失败，行情客户端可能仍然可用
+                # 测试失败但客户端可能仍可用
                 
         except Exception as e:
             self.write_log(f"行情接口连接失败: {str(e)}")
 
     def connect_trade(self):
-        """连接交易服务"""
+        """连接交易接口"""
         try:
             self.trade_client = TradeClient(self.client_config)
             self.write_log("交易接口连接成功")
             
-            # 立即查询账户和持仓信息
+            # 查询账户和持仓
             self.add_task(self.query_account)
             self.add_task(self.query_position)
             
-            # 测试交易连接
+            # 测试交易接口
             try:
-                # 通过查询资产来测试连接
+                # 查询资产测试连接
                 assets = self.trade_client.get_assets()
                 if assets:
                     self.write_log("交易接口测试成功")
@@ -280,16 +370,34 @@ class TigerGateway(BaseGateway):
                     self.write_log("交易接口连接成功，但未获取到资产数据")
             except Exception as test_e:
                 self.write_log(f"交易接口测试失败，但连接已建立: {str(test_e)}")
-                # 即使测试失败，交易客户端可能仍然可用
+                # 测试失败但客户端可能仍可用
                 
         except Exception as e:
             self.write_log(f"交易接口连接失败: {str(e)}")
 
     def connect_push(self):
-        """连接推送服务"""
+        """连接推送接口"""
         try:
-            if not TIGER_AVAILABLE:
-                self.write_log("Tiger API不可用，跳过推送连接")
+            # 检查推送客户端类是否可用
+            try:
+                from tigeropen.push.push_client import PushClient
+            except ImportError as e:
+                error_msg = str(e)
+                self.write_log(f"Tiger推送模块未安装或不完整: {error_msg}")
+                
+                # 判断是否是protobuf版本问题
+                if "runtime_version" in error_msg or "protobuf" in error_msg.lower():
+                    self.write_log("检测到protobuf版本问题")
+                    self.write_log("Tiger SDK需要protobuf 5.x版本（官方SDK使用5.28.3生成）")
+                    self.write_log("解决方案:")
+                    self.write_log("1. 卸载当前的protobuf: pip uninstall protobuf")
+                    self.write_log("2. 安装最新版: pip install protobuf>=5.0.0")
+                    self.write_log("3. 重新安装tigeropen: pip install --upgrade tigeropen")
+                    self.write_log("或者一次性执行:")
+                    self.write_log("pip uninstall protobuf tigeropen -y && pip install protobuf>=5.0.0 tigeropen")
+                else:
+                    self.write_log("推送服务不可用，但不影响基本交易功能")
+                    self.write_log("提示: 可以尝试重新安装tigeropen: pip install --upgrade tigeropen")
                 return
                 
             # 检查是否有推送配置
@@ -554,12 +662,60 @@ class TigerGateway(BaseGateway):
                 self.write_log(f"推送订阅设置失败: {str(e)}")
 
     def on_quote_change(self, tiger_symbol: str, data: list, trading: bool):
-        """行情推送回调"""
+        """
+        行情推送回调
+        
+        参数:
+            tiger_symbol: Tiger格式的交易代码
+            data: 包含行情数据的列表
+            trading: 是否处于交易时段
+        """
         try:
-            # 这里可以处理实时行情推送
-            self.write_log(f"收到行情推送: {tiger_symbol}")
+            # 解析Tiger符号为VeighNa格式
+            symbol = tiger_symbol
+            exchange = Exchange.NASDAQ  # 默认NASDAQ，可根据实际情况调整
+            
+            # 获取或创建合约
+            contract = self.get_contract(symbol, exchange)
+            if not contract:
+                return
+            
+            # 解析行情数据（Tiger API的推送数据格式）
+            # 注意：实际数据格式需要根据Tiger API文档调整
+            for item in data:
+                if isinstance(item, dict):
+                    # 创建Tick数据对象
+                    tick = TickData(
+                        symbol=symbol,
+                        exchange=exchange,
+                        datetime=datetime.now(),
+                        gateway_name=self.gateway_name,
+                        # 价格信息
+                        last_price=float(item.get('latestPrice', 0)) if item.get('latestPrice') else 0,
+                        open_price=float(item.get('open', 0)) if item.get('open') else 0,
+                        high_price=float(item.get('high', 0)) if item.get('high') else 0,
+                        low_price=float(item.get('low', 0)) if item.get('low') else 0,
+                        pre_close=float(item.get('preClose', 0)) if item.get('preClose') else 0,
+                        # 成交量信息
+                        volume=float(item.get('volume', 0)) if item.get('volume') else 0,
+                        # 买卖盘信息
+                        bid_price_1=float(item.get('bidPrice', 0)) if item.get('bidPrice') else 0,
+                        bid_volume_1=float(item.get('bidSize', 0)) if item.get('bidSize') else 0,
+                        ask_price_1=float(item.get('askPrice', 0)) if item.get('askPrice') else 0,
+                        ask_volume_1=float(item.get('askSize', 0)) if item.get('askSize') else 0,
+                    )
+                    
+                    # 缓存tick数据
+                    self.ticks[tick.vt_symbol] = tick
+                    
+                    # 推送tick数据到系统
+                    self.on_tick(tick)
+                    
+                    # 调试日志（生产环境可注释）
+                    # self.write_log(f"行情推送: {symbol} 最新价:{tick.last_price} 成交量:{tick.volume}")
+                    
         except Exception as e:
-            self.write_log(f"处理行情推送异常: {str(e)}")
+            self.write_log(f"处理行情推送异常 {tiger_symbol}: {str(e)}")
 
     def on_asset_change(self, tiger_account: str, data: list):
         """资产变化推送回调"""
@@ -580,15 +736,96 @@ class TigerGateway(BaseGateway):
             self.write_log(f"处理持仓推送异常: {str(e)}")
 
     def on_order_change(self, tiger_account: str, data: list):
-        """订单变化推送回调"""
+        """
+        订单变化推送回调
+        
+        参数:
+            tiger_account: Tiger账户ID
+            data: 包含订单数据的列表
+        """
         try:
-            self.write_log(f"收到订单变化推送: {tiger_account}")
-            # 这里可以处理订单状态变化
+            # 处理订单状态更新
+            for order_data in data:
+                if isinstance(order_data, dict):
+                    # 获取订单基本信息
+                    tiger_order_id = str(order_data.get('id', ''))
+                    symbol = order_data.get('symbol', '')
+                    
+                    # 如果没有订单ID，跳过
+                    if not tiger_order_id:
+                        continue
+                    
+                    # 获取VeighNa订单ID映射
+                    orderid = self.ID_TIGER2VT.get(tiger_order_id, tiger_order_id)
+                    
+                    # 更新订单状态
+                    # 如果状态是字符串，使用字符串映射
+                    order_status = order_data.get('status')
+                    if isinstance(order_status, str):
+                        vt_status = STATUS_TIGER2VT_STRINGS.get(order_status, Status.SUBMITTING)
+                    else:
+                        vt_status = STATUS_TIGER2VT.get(order_status, Status.SUBMITTING)
+                    
+                    order = OrderData(
+                        symbol=symbol,
+                        exchange=Exchange.NASDAQ,  # 根据市场调整
+                        orderid=orderid,
+                        type=OrderType.LIMIT if order_data.get('orderType') == 'LMT' else OrderType.MARKET,
+                        direction=Direction.LONG if order_data.get('action') == 'BUY' else Direction.SHORT,
+                        price=float(order_data.get('limitPrice', 0)) if order_data.get('limitPrice') else 0,
+                        volume=float(order_data.get('totalQuantity', 0)),
+                        traded=float(order_data.get('filledQuantity', 0)),
+                        status=vt_status,
+                        datetime=datetime.now(),
+                        gateway_name=self.gateway_name
+                    )
+                    
+                    # 推送订单更新
+                    self.on_order(order)
+                    
+                    # 如果订单有成交，生成成交记录
+                    filled_qty = float(order_data.get('filledQuantity', 0))
+                    avg_fill_price = float(order_data.get('avgFillPrice', 0)) if order_data.get('avgFillPrice') else 0
+                    
+                    if filled_qty > 0 and avg_fill_price > 0:
+                        # 检查是否是新的成交
+                        trade_key = f"{tiger_order_id}_{filled_qty}_{avg_fill_price}"
+                        
+                        if trade_key not in self.trades:
+                            self.trades.add(trade_key)
+                            
+                            # 生成交易ID
+                            self.tradeid += 1
+                            
+                            # 创建成交记录
+                            trade = TradeData(
+                                symbol=symbol,
+                                exchange=Exchange.NASDAQ,  # 根据市场调整
+                                orderid=orderid,
+                                tradeid=str(self.tradeid),
+                                direction=Direction.LONG if order_data.get('action') == 'BUY' else Direction.SHORT,
+                                price=avg_fill_price,
+                                volume=filled_qty,
+                                datetime=datetime.now(),
+                                gateway_name=self.gateway_name
+                            )
+                            
+                            # 推送成交记录
+                            self.on_trade(trade)
+                            
+                            self.write_log(f"订单成交: {symbol} 价格:{avg_fill_price} 数量:{filled_qty}")
+                    
+                    # 记录订单状态变化
+                    status_text = order_data.get('status', 'UNKNOWN')
+                    self.write_log(f"订单状态更新: {symbol} [{orderid}] -> {status_text}")
+                    
         except Exception as e:
             self.write_log(f"处理订单推送异常: {str(e)}")
+            import traceback
+            self.write_log(traceback.format_exc())
 
     def query_contracts(self) -> None:
-        """查询合约信息 - 使用Tiger API获取真实合约数据"""
+        """查询合约信息"""
         if not self.quote_client:
             return
         
@@ -598,13 +835,82 @@ class TigerGateway(BaseGateway):
             # 设置加载标志
             self._loading_initial_contracts = True
             
-            # 暂时使用预设合约列表，确保合约能正确显示
-            self.write_log("使用预设合约列表加载常用合约")
-            self._load_popular_contracts()
-            
-            # TODO: 后续优化Tiger API合约获取
-            # 目前Tiger API虽然能获取到数据，但合约推送到界面有问题
-            # 先确保基本功能正常，再优化API集成
+            # 检查是否仅使用预设合约
+            if self.use_preset_contracts:
+                self.write_log("配置为仅使用预设合约")
+                self._load_popular_contracts()
+            # 尝试使用Tiger API获取真实合约数据
+            elif hasattr(self.quote_client, 'get_symbol_names'):
+                try:
+                    # 获取美股市场的所有股票代码
+                    self.write_log("正在从Tiger API获取合约列表...")
+                    
+                    # 使用get_symbol_names获取股票代码和名称
+                    # 注意：需要导入Market枚举
+                    symbol_names = self.quote_client.get_symbol_names(
+                        market=Market.US,  # 美股市场
+                        lang=self.language  # 使用用户设置的语言
+                    )
+                    
+                    if symbol_names:
+                        self.write_log(f"获取到 {len(symbol_names)} 个合约")
+                        loaded_count = 0
+                        
+                        # 使用用户配置的最大加载数量
+                        max_contracts = self.max_contracts
+                        
+                        for symbol_info in symbol_names[:max_contracts]:
+                            try:
+                                # symbol_info通常是一个包含 symbol 和 name 的对象
+                                if hasattr(symbol_info, 'symbol'):
+                                    symbol = symbol_info.symbol
+                                    name = getattr(symbol_info, 'name', symbol)
+                                elif isinstance(symbol_info, dict):
+                                    symbol = symbol_info.get('symbol', '')
+                                    name = symbol_info.get('name', symbol)
+                                else:
+                                    symbol = str(symbol_info)
+                                    name = symbol
+                                
+                                if not symbol:
+                                    continue
+                                
+                                # 创建合约对象
+                                contract = ContractData(
+                                    symbol=symbol,
+                                    exchange=Exchange.NASDAQ,  # 默认NASDAQ，可根据实际情况调整
+                                    name=name,
+                                    product=Product.EQUITY,
+                                    size=1,
+                                    pricetick=0.01,
+                                    gateway_name=self.gateway_name
+                                )
+                                
+                                # 缓存合约
+                                vt_symbol = f"{symbol}.{Exchange.NASDAQ.value}"
+                                self.contracts[vt_symbol] = contract
+                                
+                                # 推送给系统
+                                self.on_contract(contract)
+                                loaded_count += 1
+                                
+                            except Exception as e:
+                                # 单个合约加载失败不影响其他合约
+                                pass
+                        
+                        self.write_log(f"成功加载 {loaded_count} 个合约（最大限制: {max_contracts}）")
+                        
+                    else:
+                        self.write_log("未获取到合约数据，加载预设合约")
+                        self._load_popular_contracts()
+                        
+                except Exception as api_error:
+                    self.write_log(f"Tiger API查询失败: {str(api_error)}，使用预设合约")
+                    # API查询失败时，回退到预设合约
+                    self._load_popular_contracts()
+            else:
+                self.write_log("当前Tiger API版本不支持get_symbol_names，使用预设合约")
+                self._load_popular_contracts()
             
             # 清除加载标志
             self._loading_initial_contracts = False
@@ -615,7 +921,7 @@ class TigerGateway(BaseGateway):
             self._loading_initial_contracts = False
 
     def _load_popular_contracts(self):
-        """加载预设的热门合约"""
+        """加载预设热门合约"""
         popular_symbols = [
             # 热门股票
             'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'AMZN', 'NVDA', 'META',
@@ -655,7 +961,7 @@ class TigerGateway(BaseGateway):
         self.write_log(f"预设合约加载完成，共 {loaded_count} 个")
 
     def get_contract(self, symbol: str, exchange: Exchange = Exchange.NASDAQ) -> ContractData:
-        """动态获取或创建合约"""
+        """获取或创建合约"""
         vt_symbol = f"{symbol}.{exchange.value}"
         
         # 如果合约已存在，直接返回
